@@ -1,0 +1,11 @@
+{
+  "name": "nexis-globals-relay",
+  "version": "1.0.0",
+  "main": "relay.js",
+  "scripts": {
+    "start": "node relay.js"
+  },
+  "dependencies": {
+    "ws": "^8.16.0"
+  }
+}
