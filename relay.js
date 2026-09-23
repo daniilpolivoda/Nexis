@@ -233,7 +233,6 @@ function removeClient(ws) {
   clients.delete(client.id);
 }
 
-wss.on('connection', (ws) => {
 wss.on('connection', (ws, req) => {
   const isPortal = req.url === '/portal';
 
@@ -275,7 +274,9 @@ wss.on('connection', (ws, req) => {
     }
 
     if (msg.type === 'hello') {
-      const id = String(msg.id || crypto.randomUUID());
+      const baseId = String(msg.id || crypto.randomUUID());
+      const oldClient = clients.get(baseId);
+      const id = oldClient && oldClient.ws !== ws ? `${baseId}:${crypto.randomUUID().slice(0, 8)}` : baseId;
       client = clients.get(id) || { id, ws, name: 'Player', partyName: null, color: 0, rainbow: false };
       client.ws = ws;
       client.name = safeName(msg.name, client.name);
@@ -375,8 +376,6 @@ wss.on('connection', (ws, req) => {
     }
   });
 
-  ws.on('close', () => removeClient(ws));
-  ws.on('error', () => removeClient(ws));
   ws.on('close', () => isPortal ? removePortalClient(ws) : removeClient(ws));
   ws.on('error', () => isPortal ? removePortalClient(ws) : removeClient(ws));
 });
