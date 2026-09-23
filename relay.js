@@ -5,13 +5,34 @@ const crypto = require('crypto');
 const PORT = process.env.PORT || 8080;
 const MAX_MEMBERS = 10;
 const INVITE_TTL_MS = 60_000;
+const CHAT_LIMIT = 200;
 
 const server = createServer((req, res) => {
+  const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
+
+  if (url.pathname === '/api/messages' && req.method === 'GET') {
+    handleChatMessages(req, res, url);
+    return;
+  }
+
+  if (url.pathname === '/api/send' && req.method === 'POST') {
+    handleChatSend(req, res);
+    return;
+  }
+
+  if (url.pathname.startsWith('/api/')) {
+    handleChatOk(req, res);
+    return;
+  }
+
   res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' });
   res.end('Nexis Party Relay is running');
 });
 
 const wss = new WebSocketServer({ server });
+const chatMessages = [];
+const chatOnline = new Map();
+let nextChatId = 1;
 const clients = new Map();
 const sockets = new Map();
 const parties = new Map();
@@ -32,6 +53,179 @@ function send(ws, data) {
 
 function sendError(ws, message) {
   send(ws, { type: 'error', message });
+}
+
+function sendJson(res, status, data) {
+  res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8' });
+  res.end(JSON.stringify(data));
+}
+
+function readJson(req, limit = 65536) {
+  return new Promise((resolve) => {
+    let body = '';
+    req.setEncoding('utf8');
+    req.on('data', (chunk) => {
+      body += chunk;
+      if (body.length > limit) {
+        req.destroy();
+      }
+    });
+    req.on('end', () => {
+      try {
+        resolve(JSON.parse(body || '{}'));
+      } catch {
+        resolve(null);
+      }
+    });
+    req.on('error', () => resolve(null));
+  });
+}
+
+function safeChatText(value) {
+  return String(value || '').trim().slice(0, 500);
+}
+
+function chatSelfState(uid) {
+  return {
+    uid: Number(uid) || 0,
+    role: 'none',
+    prefix: '',
+    prefixes: [],
+    banned: false,
+    banUntil: 0,
+    banReason: '',
+    muteUntil: 0,
+    voiceMuteUntil: 0,
+    needsKey: false,
+  };
+}
+
+function chatOnlineCount() {
+  const now = Date.now();
+  for (const [name, lastSeen] of chatOnline) {
+    if (now - lastSeen > 30_000) {
+      chatOnline.delete(name);
+    }
+  }
+  return chatOnline.size;
+}
+
+function sameName(a, b) {
+  return safeName(a, '').toLowerCase() === safeName(b, '').toLowerCase();
+}
+
+function visibleChatMessages(me, peer, since) {
+  const myName = safeName(me, 'Player');
+  const peerName = safeName(peer, '');
+  return chatMessages.filter((msg) => {
+    if (msg.id <= since) {
+      return false;
+    }
+
+    const target = safeName(msg.to, '');
+    const user = safeName(msg.user, '');
+    if (peerName) {
+      return target && (
+        (sameName(user, myName) && sameName(target, peerName)) ||
+        (sameName(user, peerName) && sameName(target, myName))
+      );
+    }
+
+    return !target || sameName(user, myName) || sameName(target, myName);
+  });
+}
+
+function chatConversations(me) {
+  const myName = safeName(me, 'Player');
+  const map = new Map();
+  for (const msg of chatMessages) {
+    const target = safeName(msg.to, '');
+    if (!target) {
+      continue;
+    }
+    const user = safeName(msg.user, '');
+    let peer = '';
+    if (sameName(user, myName)) {
+      peer = target;
+    } else if (sameName(target, myName)) {
+      peer = user;
+    }
+    if (!peer) {
+      continue;
+    }
+    map.set(peer.toLowerCase(), {
+      name: peer,
+      lastId: msg.id,
+      lastText: msg.text || (msg.voice ? '[voice]' : ''),
+      ts: msg.ts,
+    });
+  }
+  return [...map.values()].sort((a, b) => b.ts - a.ts);
+}
+
+function handleChatMessages(req, res, url) {
+  const since = Number(url.searchParams.get('since')) || 0;
+  const me = safeName(url.searchParams.get('me'), 'Player');
+  const peer = safeName(url.searchParams.get('peer'), '');
+  const uid = Number(url.searchParams.get('uid')) || 0;
+  chatOnline.set(me.toLowerCase(), Date.now());
+  sendJson(res, 200, {
+    online: chatOnlineCount(),
+    me: chatSelfState(uid),
+    deleted: [],
+    conversations: chatConversations(me),
+    messages: visibleChatMessages(me, peer, since),
+  });
+}
+
+async function handleChatSend(req, res) {
+  const body = await readJson(req);
+  if (!body) {
+    sendJson(res, 400, { error: 'Bad JSON' });
+    return;
+  }
+
+  const user = safeName(body.user, 'Player');
+  const text = safeChatText(body.text);
+  const voice = body.voice && typeof body.voice === 'object'
+    ? {
+        id: String(body.voice.id || '').slice(0, 128),
+        dur: Number(body.voice.dur) || 0,
+        peaks: String(body.voice.peaks || '').slice(0, 2048),
+      }
+    : null;
+
+  if (!text && !voice) {
+    sendJson(res, 400, { error: 'Empty message' });
+    return;
+  }
+
+  const message = {
+    id: nextChatId++,
+    ts: Date.now(),
+    user,
+    text,
+    to: String(body.to || ''),
+    uid: Number(body.uid) || 0,
+    prefix: String(body.prefix || 'none'),
+    role: String(body.role || 'none'),
+  };
+  if (voice) {
+    message.voice = voice;
+  }
+  chatMessages.push(message);
+  while (chatMessages.length > CHAT_LIMIT) {
+    chatMessages.shift();
+  }
+  chatOnline.set(user.toLowerCase(), Date.now());
+  sendJson(res, 200, { ok: true, message: 'Sent', id: message.id });
+}
+
+async function handleChatOk(req, res) {
+  if (req.method === 'POST') {
+    await readJson(req);
+  }
+  sendJson(res, 200, { ok: true, message: 'OK' });
 }
 
 function findClientByName(name) {
