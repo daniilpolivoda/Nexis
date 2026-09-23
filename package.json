@@ -1,5 +1,5 @@
 {
-  "name": "nexis-globals-relay",
+  "name": "nexis-party-relay",
   "version": "1.0.0",
   "main": "relay.js",
   "scripts": {
