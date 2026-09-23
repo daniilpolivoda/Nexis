@@ -16,6 +16,8 @@ const clients = new Map();
 const sockets = new Map();
 const parties = new Map();
 const invites = new Map();
+const portalSockets = new Map();
+const portalRooms = new Map();
 
 function safeName(value, fallback = 'Player') {
   const text = String(value || '').trim();
@@ -232,7 +234,15 @@ function removeClient(ws) {
 }
 
 wss.on('connection', (ws) => {
+wss.on('connection', (ws, req) => {
+  const isPortal = req.url === '/portal';
+
   ws.on('message', (raw, isBinary) => {
+    if (isPortal) {
+      handlePortalMessage(ws, raw, isBinary);
+      return;
+    }
+
     let client = sockets.get(ws);
 
     if (isBinary) {
@@ -367,7 +377,103 @@ wss.on('connection', (ws) => {
 
   ws.on('close', () => removeClient(ws));
   ws.on('error', () => removeClient(ws));
+  ws.on('close', () => isPortal ? removePortalClient(ws) : removeClient(ws));
+  ws.on('error', () => isPortal ? removePortalClient(ws) : removeClient(ws));
 });
+
+function portalSend(ws, data) {
+  if (ws.readyState === ws.OPEN) {
+    ws.send(JSON.stringify(data));
+  }
+}
+
+function portalPeers(client) {
+  const room = portalRooms.get(client.room);
+  if (!room) {
+    return [];
+  }
+  return [...room].map((peer) => portalSockets.get(peer)).filter((peer) => peer && peer.ws !== client.ws);
+}
+
+function handlePortalMessage(ws, raw, isBinary) {
+  let client = portalSockets.get(ws);
+
+  if (isBinary) {
+    if (!client || !client.room) {
+      return;
+    }
+    if (raw.length < 2 || raw.length > 524288) {
+      return;
+    }
+    for (const peer of portalPeers(client)) {
+      if (peer.ws.readyState === peer.ws.OPEN) {
+        peer.ws.send(raw, { binary: true });
+      }
+    }
+    return;
+  }
+
+  let msg;
+  try {
+    msg = JSON.parse(raw.toString());
+  } catch {
+    return;
+  }
+
+  if (msg.t === 'j') {
+    removePortalClient(ws, true);
+    const room = String(msg.r || '').trim().slice(0, 24);
+    const name = String(msg.n || 'Player').trim().slice(0, 32) || 'Player';
+    if (!room) {
+      return;
+    }
+    client = { ws, room, name, active: false };
+    portalSockets.set(ws, client);
+    if (!portalRooms.has(room)) {
+      portalRooms.set(room, new Set());
+    }
+    portalRooms.get(room).add(ws);
+
+    for (const peer of portalPeers(client)) {
+      portalSend(peer.ws, { t: 'a', v: peer.active ? 1 : 0, n: peer.name });
+      portalSend(ws, { t: 'a', v: peer.active ? 1 : 0, n: peer.name });
+    }
+    return;
+  }
+
+  if (!client) {
+    return;
+  }
+
+  if (msg.t === 'a') {
+    client.active = Number(msg.v) > 0;
+    for (const peer of portalPeers(client)) {
+      portalSend(peer.ws, { t: 'a', v: client.active ? 1 : 0, n: client.name });
+    }
+  }
+}
+
+function removePortalClient(ws, keepOpen = false) {
+  const client = portalSockets.get(ws);
+  if (!client) {
+    return;
+  }
+
+  const room = portalRooms.get(client.room);
+  if (room) {
+    room.delete(ws);
+    if (room.size === 0) {
+      portalRooms.delete(client.room);
+    }
+  }
+  portalSockets.delete(ws);
+
+  if (!keepOpen) {
+    for (const peer of portalPeers(client)) {
+      portalSend(peer.ws, { t: 'l', n: client.name });
+    }
+  }
+}
 
 setInterval(() => {
   const now = Date.now();
