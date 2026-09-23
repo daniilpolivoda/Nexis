@@ -1,7 +1,17 @@
+const { createServer } = require('http');
 const { WebSocketServer } = require('ws');
 
 const PORT = process.env.PORT || 8080;
-const wss = new WebSocketServer({ port: PORT });
+
+// 1. Создаем обычный HTTP сервер для Render
+const server = createServer((req, res) => {
+    // Небольшой ответ для браузера и Health Check Render'а
+    res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' });
+    res.end('Nexis Globals Relay is Running');
+});
+
+// 2. Привязываем WebSocketServer к HTTP серверу
+const wss = new WebSocketServer({ server });
 
 const clients = new Map();
 const parties = new Map();
@@ -53,8 +63,8 @@ wss.on('connection', (ws, req) => {
     const url = new URL(req.url, 'http://localhost');
     const token = url.searchParams.get('token') || 'dev-token';
     const userId = ++nextUserId;
-    const client = { ws, userId, token, username: 'Player' + userId, minecraftName: '', partyCode: null };
-    clients.set(userId, client);
+    const clientObj = { ws, userId, token, username: 'Player' + userId, minecraftName: '', partyCode: null };
+    clients.set(userId, clientObj);
 
     ws.on('message', (raw) => {
         let msg;
@@ -64,58 +74,58 @@ wss.on('connection', (ws, req) => {
             return;
         }
         const type = msg.type || '';
-        const clientObj = clients.get(userId);
-        if (!clientObj) return;
+        const currentClient = clients.get(userId);
+        if (!currentClient) return;
 
         switch (type) {
             case 'globals.heartbeat': {
-                clientObj.minecraftName = msg.minecraft_name || clientObj.minecraftName;
-                if (msg.minecraft_name) clientObj.username = msg.minecraft_name;
-                clientObj.serverAddress = msg.server_address || '';
-                clientObj.worldKey = msg.world_key || '';
-                clientObj.health = msg.health || 20;
-                clientObj.x = msg.x || 0;
-                clientObj.y = msg.y || 0;
-                clientObj.z = msg.z || 0;
-                clientObj.customTexture = msg.custom_texture || '';
-                clientObj.lastSeen = Date.now();
-                if (clientObj.partyCode) {
-                    broadcastToParty(clientObj, {
+                currentClient.minecraftName = msg.minecraft_name || currentClient.minecraftName;
+                if (msg.minecraft_name) currentClient.username = msg.minecraft_name;
+                currentClient.serverAddress = msg.server_address || '';
+                currentClient.worldKey = msg.world_key || '';
+                currentClient.health = msg.health || 20;
+                currentClient.x = msg.x || 0;
+                currentClient.y = msg.y || 0;
+                currentClient.z = msg.z || 0;
+                currentClient.customTexture = msg.custom_texture || '';
+                currentClient.lastSeen = Date.now();
+                if (currentClient.partyCode) {
+                    broadcastToParty(currentClient, {
                         type: 'globals.party.update',
-                        party: buildPartyJson(parties.get(clientObj.partyCode))
+                        party: buildPartyJson(parties.get(currentClient.partyCode))
                     });
                 }
                 break;
             }
             case 'globals.inventory.update': {
-                if (!clientObj.partyCode) break;
-                msg.user_id = clientObj.userId;
-                broadcastToParty(clientObj, msg);
+                if (!currentClient.partyCode) break;
+                msg.user_id = currentClient.userId;
+                broadcastToParty(currentClient, msg);
                 break;
             }
             case 'globals.point.create': {
-                if (!clientObj.partyCode) break;
-                msg.user_id = clientObj.userId;
-                msg.username = clientObj.username;
+                if (!currentClient.partyCode) break;
+                msg.user_id = currentClient.userId;
+                msg.username = currentClient.username;
                 msg.created_at_ms = Date.now();
-                broadcastToParty(clientObj, { type: 'globals.point', ...msg });
+                broadcastToParty(currentClient, { type: 'globals.point', ...msg });
                 break;
             }
             case 'globals.party.create': {
-                if (clientObj.partyCode) {
+                if (currentClient.partyCode) {
                     send(ws, { type: 'globals.error', error: 'ты уже в группе' });
                     break;
                 }
-                if (msg.minecraft_name) clientObj.username = msg.minecraft_name;
+                if (msg.minecraft_name) currentClient.username = msg.minecraft_name;
                 const code = genCode();
                 const party = {
                     code,
                     ownerId: userId,
-                    ownerUsername: clientObj.username,
-                    members: [clientObj]
+                    ownerUsername: currentClient.username,
+                    members: [currentClient]
                 };
                 parties.set(code, party);
-                clientObj.partyCode = code;
+                currentClient.partyCode = code;
                 send(ws, { type: 'globals.party.created', party: buildPartyJson(party) });
                 break;
             }
@@ -126,36 +136,29 @@ wss.on('connection', (ws, req) => {
                     send(ws, { type: 'globals.error', error: 'party not found' });
                     break;
                 }
-                if (msg.minecraft_name) clientObj.username = msg.minecraft_name;
+                if (msg.minecraft_name) currentClient.username = msg.minecraft_name;
                 if (party.members.some(m => m.userId === userId)) {
                     send(ws, { type: 'globals.party.accepted', party: buildPartyJson(party) });
                     break;
                 }
-                party.members.push(clientObj);
-                clientObj.partyCode = code;
+                party.members.push(currentClient);
+                currentClient.partyCode = code;
                 send(ws, { type: 'globals.party.accepted', party: buildPartyJson(party) });
-                broadcastToParty(clientObj, {
+                broadcastToParty(currentClient, {
                     type: 'globals.party.update',
                     party: buildPartyJson(party)
                 });
                 break;
             }
-            case 'globals.party.accept':
-            case 'globals.party.reject': {
-                break;
-            }
             case 'globals.party.list': {
-                if (!clientObj.partyCode) {
+                if (!currentClient.partyCode) {
                     send(ws, { type: 'globals.error', error: 'party not found' });
                     break;
                 }
-                const party = parties.get(clientObj.partyCode);
+                const party = parties.get(currentClient.partyCode);
                 if (party) {
                     send(ws, { type: 'globals.party.list', party: buildPartyJson(party) });
                 }
-                break;
-            }
-            case 'globals.disconnect': {
                 break;
             }
         }
@@ -185,4 +188,7 @@ wss.on('connection', (ws, req) => {
     ws.on('error', () => {});
 });
 
-console.log(`[Nexis Globals Relay] running on ws://0.0.0.0:${PORT}`);
+// 3. Запускаем HTTP сервер вместо напрямую WebSocket
+server.listen(PORT, () => {
+    console.log(`[Nexis Globals Relay] running on port ${PORT}`);
+});
