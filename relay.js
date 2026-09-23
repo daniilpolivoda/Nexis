@@ -20,6 +20,16 @@ const server = createServer((req, res) => {
     return;
   }
 
+  if ((url.pathname === '/api/channels' || url.pathname === '/api/channel/list') && req.method === 'GET') {
+    handleChannelList(req, res);
+    return;
+  }
+
+  if (url.pathname === '/api/channel/create' && req.method === 'POST') {
+    handleChannelCreate(req, res);
+    return;
+  }
+
   if (url.pathname.startsWith('/api/')) {
     handleChatOk(req, res);
     return;
@@ -32,6 +42,7 @@ const server = createServer((req, res) => {
 const wss = new WebSocketServer({ server });
 const chatMessages = [];
 const chatOnline = new Map();
+const chatChannels = new Map();
 let nextChatId = 1;
 const clients = new Map();
 const sockets = new Map();
@@ -85,6 +96,11 @@ function safeChatText(value) {
   return String(value || '').trim().slice(0, 500);
 }
 
+function safeChannelName(value, fallback = '') {
+  const text = String(value || '').trim().replace(/\s+/g, '-');
+  return text.slice(0, 32) || fallback;
+}
+
 function chatSelfState(uid) {
   return {
     uid: Number(uid) || 0,
@@ -114,24 +130,34 @@ function sameName(a, b) {
   return safeName(a, '').toLowerCase() === safeName(b, '').toLowerCase();
 }
 
-function visibleChatMessages(me, peer, since) {
+function sameChannel(a, b) {
+  return safeChannelName(a).toLowerCase() === safeChannelName(b).toLowerCase();
+}
+
+function visibleChatMessages(me, peer, channel, since) {
   const myName = safeName(me, 'Player');
   const peerName = safeName(peer, '');
+  const channelName = safeChannelName(channel, '');
   return chatMessages.filter((msg) => {
     if (msg.id <= since) {
       return false;
     }
 
     const target = safeName(msg.to, '');
+    const msgChannel = safeChannelName(msg.channel, '');
     const user = safeName(msg.user, '');
+    if (channelName) {
+      return msgChannel && sameChannel(msgChannel, channelName);
+    }
+
     if (peerName) {
-      return target && (
+      return !msgChannel && target && (
         (sameName(user, myName) && sameName(target, peerName)) ||
         (sameName(user, peerName) && sameName(target, myName))
       );
     }
 
-    return !target || sameName(user, myName) || sameName(target, myName);
+    return !msgChannel && (!target || sameName(user, myName) || sameName(target, myName));
   });
 }
 
@@ -163,10 +189,27 @@ function chatConversations(me) {
   return [...map.values()].sort((a, b) => b.ts - a.ts);
 }
 
+function channelSummaries() {
+  return [...chatChannels.values()]
+    .map((channel) => {
+      const last = [...chatMessages].reverse().find((msg) => sameChannel(msg.channel, channel.name));
+      return {
+        name: channel.name,
+        owner: channel.owner,
+        created: channel.created,
+        lastId: last ? last.id : 0,
+        lastText: last ? last.text || (last.voice ? '[voice]' : '') : '',
+        ts: last ? last.ts : channel.created,
+      };
+    })
+    .sort((a, b) => b.ts - a.ts);
+}
+
 function handleChatMessages(req, res, url) {
   const since = Number(url.searchParams.get('since')) || 0;
   const me = safeName(url.searchParams.get('me'), 'Player');
   const peer = safeName(url.searchParams.get('peer'), '');
+  const channel = safeChannelName(url.searchParams.get('channel'), '');
   const uid = Number(url.searchParams.get('uid')) || 0;
   chatOnline.set(me.toLowerCase(), Date.now());
   sendJson(res, 200, {
@@ -174,7 +217,9 @@ function handleChatMessages(req, res, url) {
     me: chatSelfState(uid),
     deleted: [],
     conversations: chatConversations(me),
-    messages: visibleChatMessages(me, peer, since),
+    channels: channelSummaries(),
+    active: { peer, channel },
+    messages: visibleChatMessages(me, peer, channel, since),
   });
 }
 
@@ -187,6 +232,7 @@ async function handleChatSend(req, res) {
 
   const user = safeName(body.user, 'Player');
   const text = safeChatText(body.text);
+  const channel = safeChannelName(body.channel, '');
   const voice = body.voice && typeof body.voice === 'object'
     ? {
         id: String(body.voice.id || '').slice(0, 128),
@@ -200,12 +246,18 @@ async function handleChatSend(req, res) {
     return;
   }
 
+  if (channel && !chatChannels.has(channel.toLowerCase())) {
+    sendJson(res, 404, { error: 'Channel not found' });
+    return;
+  }
+
   const message = {
     id: nextChatId++,
     ts: Date.now(),
     user,
     text,
     to: String(body.to || ''),
+    channel,
     uid: Number(body.uid) || 0,
     prefix: String(body.prefix || 'none'),
     role: String(body.role || 'none'),
@@ -219,6 +271,37 @@ async function handleChatSend(req, res) {
   }
   chatOnline.set(user.toLowerCase(), Date.now());
   sendJson(res, 200, { ok: true, message: 'Sent', id: message.id });
+}
+
+function handleChannelList(req, res) {
+  sendJson(res, 200, { ok: true, channels: channelSummaries() });
+}
+
+async function handleChannelCreate(req, res) {
+  const body = await readJson(req);
+  if (!body) {
+    sendJson(res, 400, { error: 'Bad JSON' });
+    return;
+  }
+
+  const name = safeChannelName(body.name, '');
+  if (!name) {
+    sendJson(res, 400, { error: 'Empty channel name' });
+    return;
+  }
+
+  const key = name.toLowerCase();
+  if (chatChannels.has(key)) {
+    sendJson(res, 409, { error: 'Channel already exists' });
+    return;
+  }
+
+  chatChannels.set(key, {
+    name,
+    owner: safeName(body.user, 'Player'),
+    created: Date.now(),
+  });
+  sendJson(res, 200, { ok: true, message: 'Channel created', channel: chatChannels.get(key) });
 }
 
 async function handleChatOk(req, res) {
