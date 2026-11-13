@@ -88,18 +88,24 @@ module.exports = function attachWindowsRelay(wss, { now = Date.now } = {}) {
     const outgoing = links.has(`${client.id}/${target.id}`);
     const incoming = links.has(`${target.id}/${client.id}`);
     if (!outgoing && !incoming) return;
+    // One pair can carry two independent broadcasts. ICE must identify its owner.
+    let stream = message.stream;
+    if (stream === undefined && outgoing !== incoming) stream = outgoing ? client.id : target.id;
+    const ownsStream = stream === client.id && outgoing;
+    const viewsStream = stream === target.id && incoming;
+    if (!ownsStream && !viewsStream) return;
     const data = message.data;
     if (!data || typeof data !== 'object' || Array.isArray(data)) return;
     if (data.description) {
       const { type, sdp } = data.description;
       if (typeof sdp !== 'string' || sdp.length > 112000) return;
-      if (!(type === 'offer' && outgoing) && !(type === 'answer' && incoming)) return;
-      send(target.ws, { type: 'signal', from: client.id, data: { description: { type, sdp } } });
+      if (!(type === 'offer' && ownsStream) && !(type === 'answer' && viewsStream)) return;
+      send(target.ws, { type: 'signal', from: client.id, stream, data: { description: { type, sdp } } });
     } else if (Object.hasOwn(data, 'candidate')) {
       const candidate = data.candidate;
       if (candidate !== null && (typeof candidate !== 'object' || Array.isArray(candidate)
         || typeof candidate.candidate !== 'string' || candidate.candidate.length > 8192)) return;
-      send(target.ws, { type: 'signal', from: client.id, data: { candidate } });
+      send(target.ws, { type: 'signal', from: client.id, stream, data: { candidate } });
     }
   }
 

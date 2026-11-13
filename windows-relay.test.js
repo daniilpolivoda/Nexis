@@ -132,3 +132,39 @@ test('bounds room membership and rejects short keys', t => {
   for (let count = 0; count < 16; count++) assert.ok(join().id);
   assert.equal(join().code, 1008);
 });
+
+test('bidirectional broadcasts route ICE and SDP by stream owner', t => {
+  const { join } = setup(t);
+  const a = join(), b = join();
+  a.message({ type: 'stream', active: true, plane: PLANE, audio: true });
+  b.message({ type: 'stream', active: true, plane: PLANE, audio: true });
+  // Ambiguous legacy traffic cannot accidentally reach the wrong peer connection.
+  a.message({ type: 'signal', to: b.id, data: { candidate: { candidate: 'ambiguous' } } });
+  a.message({ type: 'signal', to: b.id, stream: 'unknown', data: { candidate: null } });
+  assert.equal(b.take('signal').length, 0);
+
+  for (const [sender, viewer] of [[a, b], [b, a]]) {
+    sender.message({ type: 'signal', to: viewer.id, stream: sender.id,
+      data: { description: { type: 'offer', sdp: `offer-${sender.id}` } } });
+    viewer.message({ type: 'signal', to: sender.id, stream: sender.id,
+      data: { description: { type: 'answer', sdp: `answer-${sender.id}` } } });
+    sender.message({ type: 'signal', to: viewer.id, stream: sender.id,
+      data: { candidate: { candidate: `sender-ice-${sender.id}` } } });
+    viewer.message({ type: 'signal', to: sender.id, stream: sender.id,
+      data: { candidate: { candidate: `viewer-ice-${sender.id}` } } });
+    const offered = viewer.take('signal').find(message => message.data.description?.sdp === `offer-${sender.id}`);
+    assert.equal(offered.stream, sender.id);
+    assert.equal(offered.from, sender.id);
+    const answered = sender.take('signal').find(message => message.data.description?.sdp === `answer-${sender.id}`);
+    assert.equal(answered.stream, sender.id);
+    assert.equal(answered.from, viewer.id);
+    assert.equal(viewer.take('signal').find(message => message.data.candidate?.candidate === `sender-ice-${sender.id}`).stream, sender.id);
+    assert.equal(sender.take('signal').find(message => message.data.candidate?.candidate === `viewer-ice-${sender.id}`).stream, sender.id);
+  }
+  const previous = b.take('signal').length;
+  a.message({ type: 'signal', to: b.id, stream: b.id,
+    data: { description: { type: 'offer', sdp: 'viewer-cannot-offer' } } });
+  a.message({ type: 'signal', to: b.id, stream: a.id,
+    data: { description: { type: 'answer', sdp: 'owner-cannot-answer' } } });
+  assert.equal(b.take('signal').length, previous);
+});
