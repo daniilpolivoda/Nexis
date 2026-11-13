@@ -40,6 +40,7 @@ const server = createServer((req, res) => {
 });
 
 const wss = new WebSocketServer({ server });
+require('./windows-relay')(wss);
 const chatMessages = [];
 const chatOnline = new Map();
 const chatChannels = new Map();
@@ -511,6 +512,7 @@ function removeClient(ws) {
 }
 
 wss.on('connection', (ws, req) => {
+  if (req.url === '/windows') return;
   const isPortal = req.url === '/portal';
 
   ws.on('message', (raw, isBinary) => {
