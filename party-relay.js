@@ -147,10 +147,11 @@ module.exports = function attachPartyRelay(wss, { now = Date.now } = {}) {
     ws.on('close', () => disconnect(ws));
     ws.on('error', () => disconnect(ws));
     ws.on('message', raw => {
-      if (raw.length > 8192) { ws.close(1009); return; }
+      if (raw.length > 131072) { ws.close(1009); return; }
       let message;
       try { message = JSON.parse(raw.toString()); } catch { return; }
       if (!message || typeof message !== 'object' || Array.isArray(message)) return;
+      if (message.type !== 'team' && raw.length > 8192) { ws.close(1009); return; }
       let client = clients.get(ws);
       if (message.type === 'hello' && !client) {
         if (typeof message.id !== 'string' || !/^[A-Za-z0-9:_-]{1,128}$/.test(message.id)
@@ -158,10 +159,37 @@ module.exports = function attachPartyRelay(wss, { now = Date.now } = {}) {
         if (names.has(message.name.toLowerCase())) { send(ws, { type: 'error', message: 'Этот ник уже подключён к пати-серверу.' }); ws.close(1008); return; }
         client = { ws, id: message.id, name: message.name, party: null, busy: false, window: now(), messages: 0 };
         clients.set(ws, client); names.set(message.name.toLowerCase(), client);
-        send(ws, { type: 'welcome', protocol: 2, party: null });
+        send(ws, { type: 'welcome', protocol: 3, features: ['team'], party: null });
         return;
       }
       if (!client) return;
+      if (message.type === 'team') {
+        if (!client.party) return;
+        const clock = now();
+        if (message.kind === 'pose') {
+          if (raw.length > 4096) return;
+          const state = message.state;
+          if (!state || typeof state !== 'object' || Array.isArray(state)
+            || typeof state.id !== 'string' || !/^[a-f0-9-]{36}$/i.test(state.id)
+            || typeof state.server !== 'string' || state.server.length > 255
+            || typeof state.dimension !== 'string' || state.dimension.length > 128
+            || !['x', 'y', 'z', 'health', 'maxHealth', 'absorption', 'food', 'armor', 'level', 'xp', 'ping', 'slot'].every(key => Number.isFinite(state[key]))
+            || ['x', 'y', 'z'].some(key => Math.abs(state[key]) > 3.2e7)) return;
+          if (client.lastPoseAt !== undefined && clock - client.lastPoseAt < 75) return;
+          client.lastPoseAt = clock;
+          for (const member of client.party.members) if (member !== client)
+            send(member.ws, { type: 'team', kind: 'pose', from: client.name, state });
+        } else if (message.kind === 'inventory') {
+          if (typeof message.id !== 'string' || !/^[a-f0-9-]{36}$/i.test(message.id)
+            || typeof message.server !== 'string' || message.server.length > 255
+            || typeof message.data !== 'string' || message.data.length > 90000 || !/^[A-Za-z0-9+/=]+$/.test(message.data)) return;
+          if (client.lastInventoryAt !== undefined && clock - client.lastInventoryAt < 400) return;
+          client.lastInventoryAt = clock;
+          for (const member of client.party.members) if (member !== client)
+            send(member.ws, { type: 'team', kind: 'inventory', from: client.name, id: message.id, server: message.server, data: message.data });
+        }
+        return;
+      }
       if (now() - client.window >= 60000) { client.window = now(); client.messages = 0; }
       if (++client.messages > 100) { ws.close(1008, 'Rate limit'); return; }
       operation(client, message);

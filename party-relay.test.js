@@ -34,7 +34,7 @@ function setup(t) {
     const ws = new Socket();
     server.emit('connection', ws, { url: '/party' });
     ws.message({ type: 'hello', id: 'id-' + name, name });
-    assert.equal(ws.take('welcome')[0]?.protocol, 2);
+    assert.equal(ws.take('welcome')[0]?.protocol, 3);
     return ws;
   }
   function monitor(room, x) {
