@@ -7,7 +7,7 @@ const MAX_BUFFERED_BYTES = 1024 * 1024;
 const POSITION_TTL_MS = 5000;
 
 // Coordinates are client-reported. A private room key controls access to a broadcast.
-module.exports = function attachWindowsRelay(wss, { now = Date.now } = {}) {
+module.exports = function attachWindowsRelay(wss, { now = Date.now, allowsPartyRoom = () => false } = {}) {
   const sockets = new Set();
   const clients = new Map();
   const clientsById = new Map();
@@ -33,11 +33,13 @@ module.exports = function attachWindowsRelay(wss, { now = Date.now } = {}) {
   }
 
   function nearby(a, b) {
+    const partyRoom = a.room.startsWith('party:');
     return a !== b && a.room === b.room && a.server && a.server === b.server
       && a.dimension && a.dimension === b.dimension
       && a.position && b.position
       && now() - a.positionAt <= POSITION_TTL_MS && now() - b.positionAt <= POSITION_TTL_MS
-      && a.position.reduce((sum, value, i) => sum + (value - b.position[i]) ** 2, 0) <= 10000;
+      && (!partyRoom || allowsPartyRoom(a.room))
+      && (partyRoom || a.position.reduce((sum, value, i) => sum + (value - b.position[i]) ** 2, 0) <= 10000);
   }
 
   function removeLink(key, link) {
@@ -136,6 +138,9 @@ module.exports = function attachWindowsRelay(wss, { now = Date.now } = {}) {
       if (message.type === 'hello' && !client) {
         if (typeof message.room !== 'string' || message.room.length < 16 || message.room.length > 128) {
           ws.close(1008, 'Room key must contain 16 to 128 characters'); return;
+        }
+        if (message.room.startsWith('party:') && !allowsPartyRoom(message.room)) {
+          ws.close(1008, 'Party session expired'); return;
         }
         if ([...clients.values()].filter(peer => peer.room === message.room).length >= MAX_ROOM_CLIENTS) {
           ws.close(1008, 'Room is full'); return;

@@ -40,7 +40,8 @@ const server = createServer((req, res) => {
 });
 
 const wss = new WebSocketServer({ server });
-require('./windows-relay')(wss);
+const dimasikParties = require('./party-relay')(wss);
+require('./windows-relay')(wss, { allowsPartyRoom: dimasikParties.allowsPartyRoom });
 const chatMessages = [];
 const chatOnline = new Map();
 const chatChannels = new Map();
@@ -512,7 +513,7 @@ function removeClient(ws) {
 }
 
 wss.on('connection', (ws, req) => {
-  if (req.url === '/windows') return;
+  if (req.url === '/windows' || req.url === '/party') return;
   const isPortal = req.url === '/portal';
 
   ws.on('message', (raw, isBinary) => {
