@@ -146,7 +146,8 @@ module.exports = function attachWindowsRelay(wss, { now = Date.now, allowsPartyR
           ws.close(1008, 'Room is full'); return;
         }
         client = { id: crypto.randomUUID(), ws, room: message.room, position: null, positionAt: 0,
-          server: '', dimension: '', receive: true, active: false, version: 0, frameAt: -Infinity };
+          server: '', dimension: '', receive: true, active: false, version: 0, frameAt: -Infinity,
+          diagnosticsAt: -Infinity, invalidPlane: false };
         clients.set(ws, client);
         clientsById.set(client.id, client);
         send(ws, { type: 'hello', id: client.id, protocol: 2 });
@@ -165,8 +166,28 @@ module.exports = function attachWindowsRelay(wss, { now = Date.now, allowsPartyR
         client.dimension = message.dimension;
         client.receive = message.receive !== false;
         reconcile();
+      } else if (message.type === 'diagnostics') {
+        const time = now();
+        if (time - client.diagnosticsAt < 1500) return;
+        client.diagnosticsAt = time;
+        const status = { type: 'diagnostics', active: client.active, invalidPlane: client.invalidPlane,
+          ownPosition: !!client.position && time - client.positionAt <= POSITION_TTL_MS,
+          roomPeers: 0, receiving: 0, sameServer: 0, sameDimension: 0, freshPosition: 0 };
+        for (const peer of clients.values()) {
+          if (peer === client || peer.room !== client.room) continue;
+          status.roomPeers++;
+          if (!peer.receive) continue;
+          status.receiving++;
+          if (!client.server || client.server !== peer.server) continue;
+          status.sameServer++;
+          if (!client.dimension || client.dimension !== peer.dimension) continue;
+          status.sameDimension++;
+          if (peer.position && time - peer.positionAt <= POSITION_TTL_MS) status.freshPosition++;
+        }
+        send(ws, status);
       } else if (message.type === 'stream') {
-        if (message.active === true && !validPlane(message.plane)) return;
+        client.invalidPlane = message.active === true && !validPlane(message.plane);
+        if (client.invalidPlane) return;
         const active = message.active === true;
         const audio = message.audio === true;
         if (active !== client.active || audio !== client.audio || JSON.stringify(message.plane) !== JSON.stringify(client.plane)) {
